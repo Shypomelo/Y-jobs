@@ -55,7 +55,15 @@ export default function RecordsPage() {
 
     // Modal State
     const [isApproveMode, setIsApproveMode] = useState(false);
-    const [targetRecord, setTargetRecord] = useState<RecordItem | null>(null);
+
+    // Instead of holding the whole object in state, we hold the ID as requested
+    const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+
+    // Derived target record (always fresh from store)
+    const targetRecord = useMemo(() =>
+        recordsItems.find(r => r.id === selectedRecordId) || null
+        , [recordsItems, selectedRecordId]);
+
     const [deleteCount, setDeleteCount] = useState(0); // 0, 1, 2, 3(Action)
 
     // Form State
@@ -102,22 +110,26 @@ export default function RecordsPage() {
     // Handler to open modal (New or Edit)
     const openModal = (record?: RecordItem) => {
         if (record) {
-            setTargetRecord(record);
-            setSiteName(record.siteName);
-            setWorkType(record.workType);
-            setHandlers(record.handlers && record.handlers.length > 0 ? record.handlers : ["", ""]);
-            setPhotos(record.photos || []);
-            setCompletedDate(record.completedDate || "");
+            // Requirement: Use Record ID to find data
+            const freshRecord = recordsItems.find(r => r.id === record.id);
+            if (!freshRecord) return; // Should not happen if passed from map
+
+            setSelectedRecordId(freshRecord.id);
+            setSiteName(freshRecord.siteName);
+            setWorkType(freshRecord.workType);
+            setHandlers(freshRecord.handlers && freshRecord.handlers.length > 0 ? freshRecord.handlers : ["", ""]);
+            setPhotos(freshRecord.photos || []);
+            setCompletedDate(freshRecord.completedDate || "");
 
             // Convert flat pairs to groups
-            if (record.pairs && record.pairs.length > 0) {
+            if (freshRecord.pairs && freshRecord.pairs.length > 0) {
                 const groupedMap = new Map<string, RecordGroup>();
 
-                record.pairs.forEach(p => {
+                freshRecord.pairs.forEach(p => {
                     const key = `${p.newModel}|${p.oldModel}`;
                     if (!groupedMap.has(key)) {
                         groupedMap.set(key, {
-                            id: crypto.randomUUID(),
+                            id: crypto.randomUUID(), // Group concept doesn't exist in DB, so new ID for UI is fine
                             newModel: p.newModel,
                             oldModel: p.oldModel,
                             quantity: 0,
@@ -127,7 +139,7 @@ export default function RecordsPage() {
                     const group = groupedMap.get(key)!;
                     group.quantity += 1;
                     group.pairs.push({
-                        id: crypto.randomUUID(),
+                        id: p.id, // CRITICAL: Reuse existing pair ID
                         newSerial: p.newSerial,
                         oldSerial: p.oldSerial
                     });
@@ -137,7 +149,7 @@ export default function RecordsPage() {
                 setGroups([]); // No pairs
             }
         } else {
-            setTargetRecord(null);
+            setSelectedRecordId(null);
             setSiteName("");
             setWorkType("優化器");
             setHandlers(["", ""]); // Default 2 slots
@@ -152,7 +164,7 @@ export default function RecordsPage() {
 
     const closeModal = () => {
         setIsApproveMode(false);
-        setTargetRecord(null);
+        setSelectedRecordId(null);
         setDeleteCount(0);
         setActiveGroupIndex(null);
     };
@@ -168,7 +180,7 @@ export default function RecordsPage() {
     };
 
     const removeHandler = (index: number) => {
-        // Allow removing if more than 1, or just clear if it's the only one (but UI shows remove button only if > 1 usually)
+        // Allow removing if more than 1, or just clear if it's the only one
         if (handlers.length <= 1) return;
         setHandlers(prev => prev.filter((_, i) => i !== index));
     };
@@ -276,22 +288,12 @@ export default function RecordsPage() {
             return;
         }
 
-        // Filter out empty handlers
         const validHandlers = handlers.filter(h => h.trim() !== "");
-        // if (validHandlers.length === 0) {
-        //     alert("請至少選擇一位處理人員");
-        //     return;
-        // }
-        // Requirement says "Default two personnel", implies we should select them. 
-        // But if user leaves them blank, maybe we allow? 
-        // Let's being lenient but ideally should have at least one. 
-        // User prompt: "items allowed empty". Didn't say handlers can be empty.
-        // I will enforce at least one handler if possible, or just save what we have.
 
         // Flatten groups to RecordPair[]
         const flatPairs: RecordPair[] = groups.flatMap(group =>
             group.pairs.map(pair => ({
-                id: pair.id, // Preserve ID if possible, or meaningless if new
+                id: pair.id, // Preserve ID if possible (reused from openModal)
                 oldModel: group.oldModel,
                 newModel: group.newModel,
                 oldSerial: pair.oldSerial,
@@ -318,9 +320,44 @@ export default function RecordsPage() {
         closeModal();
     };
 
-    const handleConfirm = () => {
+    const handleConfirmTransfer = () => {
         if (!targetRecord) return;
+
+        // 1. Validation
+        const validHandlers = handlers.filter(h => h.trim() !== "");
+        if (validHandlers.length === 0) {
+            alert("請至少選擇一位處理人員以便轉入已確認區");
+            return;
+        }
+        if (!siteName) {
+            alert("請填寫案場名稱");
+            return;
+        }
+
+        // 2. Save current state first (Auto-save)
+        const flatPairs: RecordPair[] = groups.flatMap(group =>
+            group.pairs.map(pair => ({
+                id: pair.id,
+                oldModel: group.oldModel,
+                newModel: group.newModel,
+                oldSerial: pair.oldSerial,
+                newSerial: pair.newSerial
+            }))
+        );
+
+        updateRecord(targetRecord.id, {
+            handlers: validHandlers,
+            siteName,
+            workType,
+            pairs: flatPairs,
+            photos,
+            completedDate
+        });
+
+        // 3. Confirm (Move to Confirmed List)
         confirmRecord(targetRecord.id);
+
+        // 4. Close
         closeModal();
     };
 
@@ -340,7 +377,6 @@ export default function RecordsPage() {
         setDeleteCount(0);
     };
 
-    // Filter Logic
     // Filter Logic
     const filteredRecords = useMemo(() => {
         if (filterRegion === "全區") return recordsItems;
@@ -458,7 +494,7 @@ export default function RecordsPage() {
                                             </td>
                                             <td className="px-6 py-4 text-stone-600 dark:text-stone-400">
                                                 {item.pairs.length > 0 ? (
-                                                    <span>{item.pairs.length} 組</span> // Requirement: "X組" or "多品項(N)"
+                                                    <span>{item.pairs.length} 組</span>
                                                 ) : (
                                                     <span className="text-stone-400 text-xs italic">無</span>
                                                 )}
@@ -738,14 +774,6 @@ export default function RecordsPage() {
                             <div className="flex items-center gap-2">
                                 {targetRecord && (
                                     <>
-                                        <button
-                                            onClick={handleConfirm}
-                                            className="px-4 py-2 rounded-lg bg-green-100 text-green-700 font-bold hover:bg-green-200 transition-colors flex items-center gap-1"
-                                        >
-                                            <span className="material-symbols-outlined text-lg">check</span>
-                                            核許
-                                        </button>
-
                                         {deleteCount > 0 ? (
                                             <button
                                                 onClick={handleDeleteClick}
@@ -767,6 +795,17 @@ export default function RecordsPage() {
                                     </>
                                 )}
                             </div>
+
+                            {/* Middle: Confirm Transfer */}
+                            {targetRecord && (
+                                <button
+                                    onClick={handleConfirmTransfer}
+                                    className="px-4 py-2 rounded-lg bg-orange-100 text-orange-800 font-bold hover:bg-orange-200 transition-colors flex items-center gap-1"
+                                >
+                                    <span className="material-symbols-outlined text-lg">check_circle</span>
+                                    確認轉入已確認維修
+                                </button>
+                            )}
 
                             {/* Right: Cancel / Save */}
                             <div className="flex items-center gap-3">

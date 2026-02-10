@@ -387,10 +387,6 @@ export function ReportProvider({ children }: { children: ReactNode }) {
         const newItem: RecordItem = {
             ...item,
             id: crypto.randomUUID(),
-            // Provide defaults for missing fields to satisfy typescript
-            location: "",
-            workType: "房屋",
-            createdAtDate: new Date().toISOString().split("T")[0],
         };
         setRecordsItems(prev => [newItem, ...prev]);
     };

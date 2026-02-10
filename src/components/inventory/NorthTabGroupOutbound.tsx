@@ -14,6 +14,7 @@ type Props = {
     inboundEvents: InboundEvent[];
     setInboundEvents: Dispatch<SetStateAction<InboundEvent[]>>;
     onVerifyInbound: (event: InboundEvent) => void;
+    onVerifyOutbound?: (id: string, updatedEvent: Partial<OutboundEvent>) => void; // Added Prop
     inventoryItems: InventoryItem[];
     // Return Handlers
     onReturnInbound: (event: InboundEvent) => void;
@@ -28,6 +29,7 @@ export default function TabGroupOutbound({
     inboundEvents,
     setInboundEvents,
     onVerifyInbound,
+    onVerifyOutbound,
     inventoryItems,
     onReturnInbound,
     onReturnOutbound,
@@ -70,18 +72,22 @@ export default function TabGroupOutbound({
     };
 
     const handleVerifyOutbound = (id: string, updatedEvent: Partial<OutboundEvent>) => {
-        setEvents((prev) =>
-            prev.map((e) => {
-                if (e.id !== id) return e;
-                return {
-                    ...e,
-                    ...updatedEvent,
-                    status: "Verified",
-                    verifyDate: new Date().toISOString().split("T")[0],
-                    verifyUser: "系統",
-                };
-            })
-        );
+        if (onVerifyOutbound) {
+            onVerifyOutbound(id, updatedEvent);
+        } else {
+            setEvents((prev) =>
+                prev.map((e) => {
+                    if (e.id !== id) return e;
+                    return {
+                        ...e,
+                        ...updatedEvent,
+                        status: "Verified",
+                        verifyDate: new Date().toISOString().split("T")[0],
+                        verifyUser: "系統",
+                    };
+                })
+            );
+        }
         closeDetail();
     };
 
@@ -101,7 +107,9 @@ export default function TabGroupOutbound({
     };
 
     // Derived Targets
-    const targetOutbound = events.find((e) => e.id === selectedOutboundId);
+    // Derived Targets
+    const targetOutboundRaw = events.find((e) => e.id === selectedOutboundId);
+    const targetOutbound = targetOutboundRaw ? normalizeOutbound(targetOutboundRaw) : undefined;
     const targetInbound = inboundEvents.find((e) => e.id === selectedInboundId);
 
     return (
@@ -227,6 +235,27 @@ export default function TabGroupOutbound({
     );
 }
 
+// --- Helper: Normalize Outbound (Schema Alignment) ---
+const normalizeOutbound = (e: any): OutboundEvent => {
+    return {
+        ...e,
+        // 1. Handlers
+        handlers: e.handlerNames || e.handlers || [],
+        // 2. Site Name
+        site: e.siteName || e.site || "",
+        // 3. Source
+        source: e.source || "",
+        // 4. Items (Ensure Array)
+        items: e.items || [],
+        // 5. Photos
+        photos: e.photoThumbs || e.photos || [],
+        // 6. Date
+        date: e.completedAt || e.usedAt || e.date || "",
+        // 7. Ensure ID
+        id: e.id
+    };
+};
+
 // --- Components ---
 
 function OutboundTable({
@@ -263,49 +292,52 @@ function OutboundTable({
                                 </td>
                             </tr>
                         ) : (
-                            events.map((item) => (
-                                <tr key={item.id} className="hover:bg-stone-50 dark:hover:bg-stone-800/30 transition-colors">
-                                    <td className="px-6 py-4 text-stone-600 dark:text-stone-400 max-w-[150px] truncate" title={item.handlers?.join("、") || "-"}>
-                                        {item.handlers?.join("、") || "-"}
-                                    </td>
-                                    <td className="px-6 py-4 text-stone-800 dark:text-stone-200 font-medium">
-                                        {item.site}
-                                    </td>
-                                    <td className="px-6 py-4 text-stone-600 dark:text-stone-400">
-                                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-stone-100 text-stone-600 border border-stone-200 dark:bg-stone-800 dark:text-stone-300 dark:border-stone-700">
-                                            {item.source || "-"}
-                                        </span>
-                                    </td>
-                                    <td className="px-6 py-4 text-stone-600 dark:text-stone-400">
-                                        {item.items.length > 1 ? `多品項 (${item.items.length})` : (item.items[0]?.itemName || "-")}
-                                    </td>
-                                    <td className="px-6 py-4 text-stone-600 dark:text-stone-400">
-                                        {item.photos && item.photos.length > 0 ? (
-                                            <span className="text-xs text-stone-500">{item.photos.length} 張相片</span>
-                                        ) : "-"}
-                                    </td>
-                                    <td className="px-6 py-4 text-stone-600 dark:text-stone-400 font-mono text-xs">
-                                        {item.date}
-                                    </td>
-                                    <td className="px-6 py-4">
-                                        {onReturn ? (
-                                            <button
-                                                onClick={() => onReturn(item.id)}
-                                                className="px-3 py-1.5 text-xs font-bold rounded-lg bg-stone-200 text-stone-700 hover:bg-stone-300 transition-colors dark:bg-stone-700 dark:text-stone-300 dark:hover:bg-stone-600"
-                                            >
-                                                退回
-                                            </button>
-                                        ) : (
-                                            <button
-                                                onClick={() => onDetailClick(item.id)}
-                                                className="text-primary hover:text-primary/80 font-medium text-sm transition-colors"
-                                            >
-                                                詳細資料
-                                            </button>
-                                        )}
-                                    </td>
-                                </tr>
-                            ))
+                            events.map((rawItem) => {
+                                const item = normalizeOutbound(rawItem);
+                                return (
+                                    <tr key={item.id} className="hover:bg-stone-50 dark:hover:bg-stone-800/30 transition-colors">
+                                        <td className="px-6 py-4 text-stone-600 dark:text-stone-400 max-w-[150px] truncate" title={item.handlers?.join("、") || "-"}>
+                                            {item.handlers?.join("、") || "-"}
+                                        </td>
+                                        <td className="px-6 py-4 text-stone-800 dark:text-stone-200 font-medium">
+                                            {item.site}
+                                        </td>
+                                        <td className="px-6 py-4 text-stone-600 dark:text-stone-400">
+                                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-stone-100 text-stone-600 border border-stone-200 dark:bg-stone-800 dark:text-stone-300 dark:border-stone-700">
+                                                {item.source || "-"}
+                                            </span>
+                                        </td>
+                                        <td className="px-6 py-4 text-stone-600 dark:text-stone-400">
+                                            {item.items.length > 1 ? `多品項 (${item.items.length})` : (item.items[0]?.itemName || "-")}
+                                        </td>
+                                        <td className="px-6 py-4 text-stone-600 dark:text-stone-400">
+                                            {item.photos && item.photos.length > 0 ? (
+                                                <span className="text-xs text-stone-500">{item.photos.length} 張相片</span>
+                                            ) : "-"}
+                                        </td>
+                                        <td className="px-6 py-4 text-stone-600 dark:text-stone-400 font-mono text-xs">
+                                            {item.date}
+                                        </td>
+                                        <td className="px-6 py-4">
+                                            {onReturn ? (
+                                                <button
+                                                    onClick={() => onReturn(item.id)}
+                                                    className="px-3 py-1.5 text-xs font-bold rounded-lg bg-stone-200 text-stone-700 hover:bg-stone-300 transition-colors dark:bg-stone-700 dark:text-stone-300 dark:hover:bg-stone-600"
+                                                >
+                                                    退回
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    onClick={() => onDetailClick(item.id)}
+                                                    className="text-primary hover:text-primary/80 font-medium text-sm transition-colors"
+                                                >
+                                                    詳細資料
+                                                </button>
+                                            )}
+                                        </td>
+                                    </tr>
+                                );
+                            })
                         )}
                     </tbody>
                 </table>

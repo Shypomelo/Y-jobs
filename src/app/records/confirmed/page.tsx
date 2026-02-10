@@ -6,14 +6,16 @@ import { useReport, RecordItem, PartPair, PhotoItem, getRegionFromLocation, getL
 
 const HANDLERS_OPTIONS = ["柚子", "QQ", "俊傑", "竹哥"] as const;
 const WORK_TYPES = ["優化器", "逆變器", "線管路", "監控", "房屋"] as const;
+const SOURCE_OPTIONS = ["公司庫存", "SE提供", "案場餘料"] as const;
 
 export default function ConfirmedRecordsPage() {
-    const { recordsConfirmedItems, unconfirmRecord, updateRecord } = useReport();
+    const { recordsConfirmedItems, unconfirmRecord, updateRecord, deleteRecord } = useReport();
     const [showModal, setShowModal] = useState(false);
     const [editId, setEditId] = useState<string | null>(null);
     const [regionFilter, setRegionFilter] = useState<"全區" | "北區" | "中區" | "南區">("全區");
+    const [deleteCount, setDeleteCount] = useState(0);
 
-    // Form State (Same as RecordsPage)
+    // Form State
     const [formData, setFormData] = useState<{
         handlers: string[];
         siteName: string;
@@ -21,13 +23,15 @@ export default function ConfirmedRecordsPage() {
         pairs: PartPair[];
         photos: PhotoItem[];
         completedDate: string;
+        source: "公司庫存" | "SE提供" | "案場餘料";
     }>({
         handlers: ["", ""],
         siteName: "",
         workType: "優化器",
         pairs: [],
         photos: [],
-        completedDate: ""
+        completedDate: "",
+        source: "公司庫存"
     });
 
     const pairRefs = useRef<(HTMLInputElement | null)[]>([]);
@@ -53,14 +57,17 @@ export default function ConfirmedRecordsPage() {
             workType: item.workType,
             pairs: item.pairs.map(p => ({ ...p })),
             photos: item.photos.map(p => ({ ...p })),
-            completedDate: item.completedDate || (item.createdAtDate ? item.createdAtDate.replace(/\//g, "-") : "")
+            completedDate: item.completedDate || (item.createdAtDate ? item.createdAtDate.replace(/\//g, "-") : ""),
+            source: (item as any).source || "公司庫存"
         });
+        setDeleteCount(0);
         setShowModal(true);
     };
 
     const closeModal = () => {
         setShowModal(false);
         setEditId(null);
+        setDeleteCount(0);
     };
 
     const handleSubmit = () => {
@@ -86,10 +93,96 @@ export default function ConfirmedRecordsPage() {
             pairs: formData.pairs,
             photos: formData.photos,
             completedDate: formData.completedDate,
-            region: region
+            region: region,
+            // @ts-ignore
+            source: formData.source
         });
 
         closeModal();
+    };
+
+    const handleConfirm = () => {
+        if (!editId) return;
+
+        // 1. Validation
+        const validHandlers = formData.handlers.filter(h => h.trim() !== "");
+        if (validHandlers.length === 0) {
+            alert("請至少選擇一位處理人員");
+            return;
+        }
+        if (!formData.siteName) {
+            alert("請填寫案場名稱");
+            return;
+        }
+
+        // 2. Region Check
+        const locationKey = getLocationKeyFromSiteName(formData.siteName);
+        const region = getRegionFromLocation(locationKey);
+
+        if (region !== "北區") {
+            alert("目前只支援「北區」自動同步到出庫");
+            return;
+        }
+
+        try {
+            const STORAGE_KEY = "yjob.inventory.north.v1";
+            const stored = window.localStorage.getItem(STORAGE_KEY);
+            let inventoryState: any = stored ? JSON.parse(stored) : {};
+
+            const outboundList = Array.isArray(inventoryState.outboundEvents) ? inventoryState.outboundEvents : [];
+
+            // 3. Deduplication
+            const isDuplicate = outboundList.some((e: any) => e.sourceRecordId === editId);
+            if (isDuplicate) {
+                alert("此紀錄已同步過 (出庫清單已存在)");
+                return;
+            }
+
+            // 4. Generate Items Summary
+            let itemsSummary = "-";
+            if (formData.pairs.length > 1) {
+                itemsSummary = `多品項(${formData.pairs.length}組)`;
+            } else if (formData.pairs.length === 1) {
+                const pair = formData.pairs[0];
+                itemsSummary = pair.newModel || "未填寫型號";
+            }
+
+            // 5. Create Outbound Event (Use Current Form Data)
+            const originalItem = recordsConfirmedItems.find(r => r.id === editId);
+            const createdAtStr = originalItem?.createdAtDate || new Date().toISOString().split('T')[0];
+
+            const newEvent = {
+                id: crypto.randomUUID(),
+                sourceRecordId: editId,
+                region: "north",
+                date: formData.completedDate || createdAtStr,
+                createdAt: createdAtStr,
+                siteName: formData.siteName,
+                handlerNames: validHandlers,
+                source: formData.source,
+                status: "Ready",
+                note: `由維修紀錄同步 (${formData.workType})`,
+                itemsSummary: itemsSummary,
+                items: formData.pairs.map(p => ({
+                    id: crypto.randomUUID(),
+                    itemName: p.newModel,
+                    oldSn: p.oldSerial,
+                    newSn: p.newSerial
+                })),
+                photos: formData.photos.map(p => p.url)
+            };
+
+            // 6. Save
+            inventoryState.outboundEvents = [newEvent, ...outboundList];
+            window.localStorage.setItem(STORAGE_KEY, JSON.stringify(inventoryState));
+            alert("已同步到北區出庫！");
+
+            closeModal();
+
+        } catch (e) {
+            console.error("Sync failed:", e);
+            alert("同步失敗，請查看 Console");
+        }
     };
 
     const handleReturn = (id: string, e: React.MouseEvent) => {
@@ -99,7 +192,21 @@ export default function ConfirmedRecordsPage() {
         }
     };
 
-    // --- Form Field Handlers (duplicated from RecordsPage for standalone function) ---
+    const handleDeleteClick = () => {
+        if (!editId) return;
+        if (deleteCount < 2) {
+            setDeleteCount(prev => prev + 1);
+        } else {
+            deleteRecord(editId);
+            closeModal();
+        }
+    };
+
+    const handleDeleteCancel = () => {
+        setDeleteCount(0);
+    };
+
+    // --- Form Field Handlers ---
     const handleHandlerChange = (index: number, value: string) => {
         setFormData(prev => {
             const newHandlers = [...prev.handlers];
@@ -137,23 +244,6 @@ export default function ConfirmedRecordsPage() {
             return { ...prev, photos: prev.photos.filter(p => p.id !== id) };
         });
     };
-    const handleKeyDown = (e: React.KeyboardEvent, index: number, colType: 'newSerial' | 'oldSerial') => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            if (colType === 'newSerial') {
-                const oldSerialIndex = index * 4 + 3;
-                pairRefs.current[oldSerialIndex]?.focus();
-            } else if (colType === 'oldSerial') {
-                const nextRowNewSerialIndex = (index + 1) * 4 + 2;
-                if (pairRefs.current[nextRowNewSerialIndex]) {
-                    pairRefs.current[nextRowNewSerialIndex]?.focus();
-                } else {
-                    addPair();
-                    setTimeout(() => { pairRefs.current[nextRowNewSerialIndex]?.focus(); }, 50);
-                }
-            }
-        }
-    };
 
     return (
         <div className="min-h-screen w-full bg-background-light dark:bg-background-dark pb-20 font-sans">
@@ -175,7 +265,6 @@ export default function ConfirmedRecordsPage() {
             </header>
 
             <main className="w-full max-w-[1200px] mx-auto p-4 md:p-6">
-
                 {/* Region Filter & Back Link */}
                 <div className="flex items-center mb-4 gap-4">
                     <Link
@@ -192,8 +281,8 @@ export default function ConfirmedRecordsPage() {
                                 key={region}
                                 onClick={() => setRegionFilter(region)}
                                 className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${regionFilter === region
-                                        ? "bg-white dark:bg-stone-700 text-stone-900 dark:text-stone-100 shadow-sm"
-                                        : "text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-200"
+                                    ? "bg-white dark:bg-stone-700 text-stone-900 dark:text-stone-100 shadow-sm"
+                                    : "text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-200"
                                     }`}
                             >
                                 {region}
@@ -255,7 +344,7 @@ export default function ConfirmedRecordsPage() {
                                                     onClick={() => openEditModal(item)}
                                                     className="text-primary hover:text-primary/80 font-medium text-sm transition-colors"
                                                 >
-                                                    詳細
+                                                    詳細/編輯
                                                 </button>
                                             </td>
                                             <td className="px-6 py-4">
@@ -276,7 +365,7 @@ export default function ConfirmedRecordsPage() {
                 </div>
             </main>
 
-            {/* Editing Modal (Same visual as RecordsPage, but for Confirmed items) */}
+            {/* Editing Modal */}
             {showModal && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm p-4">
                     <div className="bg-white dark:bg-stone-900 rounded-2xl shadow-xl w-full max-w-4xl overflow-hidden border border-stone-100 dark:border-stone-800 animate-in fade-in zoom-in-95 duration-200 max-h-[90vh] flex flex-col">
@@ -327,33 +416,49 @@ export default function ConfirmedRecordsPage() {
                                                 {WORK_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                                             </select>
                                         </div>
-                                        <div className="col-span-2">
-                                            <label className="block text-xs font-medium text-stone-500 mb-1">完成時間</label>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs font-medium text-stone-500 mb-1">完成日期</label>
                                             <input type="date" value={formData.completedDate} onChange={e => setFormData({ ...formData, completedDate: e.target.value })} className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-stone-700 bg-stone-50 dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-medium text-stone-500 mb-1">料件來源 (同步用)</label>
+                                            <select value={formData.source} onChange={e => setFormData({ ...formData, source: e.target.value as any })} className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-stone-700 bg-stone-50 dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm">
+                                                {SOURCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                            </select>
                                         </div>
                                     </div>
                                 </div>
                             </div>
 
                             {/* Pairs */}
-                            <div>
-                                <div className="flex items-center justify-between mb-2">
+                            <div className="space-y-4 pt-4 border-t border-stone-100 dark:border-stone-800">
+                                <div className="flex items-center justify-between">
                                     <label className="text-sm font-bold text-stone-700 dark:text-stone-300">更換料件明細</label>
-                                    <button onClick={addPair} className="text-xs text-primary hover:text-primary/80 font-medium flex items-center gap-1">
+                                    <button onClick={addPair} className="text-xs bg-stone-100 hover:bg-stone-200 text-stone-700 px-3 py-1.5 rounded-full font-bold transition-all flex items-center gap-1">
                                         <span className="material-symbols-outlined text-sm">add</span> 新增一組
                                     </button>
                                 </div>
-                                <div className="space-y-4">
-                                    {formData.pairs.map((pair, index) => (
-                                        <div key={pair.id} className="relative bg-stone-50 dark:bg-stone-800/30 p-4 rounded-lg border border-stone-100 dark:border-stone-800 group">
-                                            <div className="grid grid-cols-2 gap-4">
-                                                <div><label className="block text-[10px] text-stone-400 mb-1">舊型號</label><input ref={el => { pairRefs.current[index * 4 + 1] = el }} type="text" value={pair.oldModel} onChange={e => handlePairChange(pair.id, "oldModel", e.target.value)} className="w-full px-3 py-2 rounded border border-stone-200 dark:border-stone-700 text-sm focus:ring-2 focus:ring-primary/50 focus:outline-none bg-white dark:bg-stone-800" placeholder="輸入" /></div>
-                                                <div><label className="block text-[10px] text-stone-400 mb-1">舊序號</label><input ref={el => { pairRefs.current[index * 4 + 3] = el }} type="text" value={pair.oldSerial} onChange={e => handlePairChange(pair.id, "oldSerial", e.target.value)} onKeyDown={e => handleKeyDown(e, index, 'oldSerial')} className="w-full px-3 py-2 rounded border border-stone-200 dark:border-stone-700 text-sm focus:ring-2 focus:ring-primary/50 focus:outline-none bg-white dark:bg-stone-800" placeholder="掃碼" /></div>
-                                                <div><label className="block text-[10px] text-stone-400 mb-1">新型號</label><input ref={el => { pairRefs.current[index * 4 + 0] = el }} type="text" value={pair.newModel} onChange={e => handlePairChange(pair.id, "newModel", e.target.value)} className="w-full px-3 py-2 rounded border border-stone-200 dark:border-stone-700 text-sm focus:ring-2 focus:ring-primary/50 focus:outline-none bg-white dark:bg-stone-800" placeholder="輸入" /></div>
-                                                <div><label className="block text-[10px] text-stone-400 mb-1">新序號</label><input ref={el => { pairRefs.current[index * 4 + 2] = el }} type="text" value={pair.newSerial} onChange={e => handlePairChange(pair.id, "newSerial", e.target.value)} onKeyDown={e => handleKeyDown(e, index, 'newSerial')} className="w-full px-3 py-2 rounded border border-stone-200 dark:border-stone-700 text-sm focus:ring-2 focus:ring-primary/50 focus:outline-none bg-white dark:bg-stone-800" placeholder="掃碼" /></div>
+                                <div className="space-y-3">
+                                    {formData.pairs.map((pair, pIndex) => (
+                                        <div key={pair.id} className="grid grid-cols-12 gap-2 items-center bg-stone-50 dark:bg-stone-900/50 p-3 rounded-lg border border-stone-100 dark:border-stone-800">
+                                            <div className="col-span-3">
+                                                <input placeholder="舊型號" value={pair.oldModel} onChange={e => handlePairChange(pair.id, "oldModel", e.target.value)} className="input-sm w-full" />
                                             </div>
-                                            <div className="flex justify-center mt-3 border-t border-stone-100 dark:border-stone-700/50 pt-2">
-                                                <button onClick={() => removePair(pair.id)} className="text-stone-400 hover:text-red-500 transition-colors p-1" tabIndex={-1}><span className="material-symbols-outlined text-xl">delete</span></button>
+                                            <div className="col-span-3">
+                                                <input placeholder="舊序號" value={pair.oldSerial} onChange={e => handlePairChange(pair.id, "oldSerial", e.target.value)} className="input-sm w-full" />
+                                            </div>
+                                            <div className="col-span-3">
+                                                <input placeholder="新型號" value={pair.newModel} onChange={e => handlePairChange(pair.id, "newModel", e.target.value)} className="input-sm w-full" />
+                                            </div>
+                                            <div className="col-span-2">
+                                                <input placeholder="新序號" value={pair.newSerial} onChange={e => handlePairChange(pair.id, "newSerial", e.target.value)} className="input-sm w-full" />
+                                            </div>
+                                            <div className="col-span-1 flex justify-end">
+                                                <button onClick={() => removePair(pair.id)} className="text-stone-400 hover:text-red-500">
+                                                    <span className="material-symbols-outlined text-lg">close</span>
+                                                </button>
                                             </div>
                                         </div>
                                     ))}
@@ -361,24 +466,66 @@ export default function ConfirmedRecordsPage() {
                             </div>
 
                             {/* Photos */}
-                            <div>
-                                <label className="block text-xs font-medium text-stone-500 mb-2">維修相片</label>
-                                <div className="flex flex-wrap items-center gap-3">
-                                    {formData.photos.map((photo) => (
-                                        <div key={photo.id} className="relative group size-20 rounded-lg border border-stone-200 overflow-hidden bg-stone-50"><img src={photo.url} alt="preview" className="w-full h-full object-cover" /><button onClick={() => removePhoto(photo.id)} className="absolute top-1 right-1 size-5 bg-black/50 hover:bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><span className="material-symbols-outlined text-sm">close</span></button></div>
+                            <div className="space-y-2 pt-4 border-t border-stone-100 dark:border-stone-800">
+                                <label className="text-sm font-bold text-stone-700 dark:text-stone-300">維修相片</label>
+                                <div className="grid grid-cols-5 gap-3">
+                                    {formData.photos.map(p => (
+                                        <div key={p.id} className="relative aspect-square rounded-lg overflow-hidden border border-stone-200 group">
+                                            <img src={p.url || "/placeholder.jpg"} className="w-full h-full object-cover" />
+                                            <button onClick={() => removePhoto(p.id)} className="absolute top-1 right-1 p-1 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <span className="material-symbols-outlined text-xs">close</span>
+                                            </button>
+                                        </div>
                                     ))}
-                                    <label className="cursor-pointer size-20 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-400 border border-stone-200 border-dashed flex flex-col items-center justify-center transition-colors text-xs gap-1"><span className="material-symbols-outlined text-2xl">add_a_photo</span>上傳<input type="file" multiple accept="image/*" className="hidden" onChange={handlePhotoUpload} /></label>
+                                    <label className="aspect-square rounded-lg border-2 border-dashed border-stone-200 hover:border-primary/50 hover:bg-primary/5 cursor-pointer flex flex-col items-center justify-center text-stone-400 hover:text-primary transition-all">
+                                        <span className="material-symbols-outlined text-2xl">add_a_photo</span>
+                                        <input type="file" multiple accept="image/*" className="hidden" onChange={handlePhotoUpload} />
+                                    </label>
                                 </div>
                             </div>
                         </div>
 
-                        <div className="px-6 py-4 bg-stone-50 dark:bg-stone-800/50 flex justify-end gap-3 shrink-0">
-                            <button onClick={closeModal} className="px-4 py-2 rounded-lg text-stone-600 hover:bg-stone-200 transition-colors text-sm font-medium">取消</button>
-                            <button onClick={handleSubmit} className="px-6 py-2 rounded-lg bg-primary/10 text-primary-dark hover:bg-primary/20 transition-colors text-sm font-bold shadow-sm border border-primary/20">儲存更新</button>
+                        <div className="p-4 border-t border-stone-100 dark:border-stone-800 bg-stone-50 dark:bg-stone-900/50 flex items-center justify-between shrink-0">
+                            <div className="flex items-center gap-2">
+                                {deleteCount > 0 ? (
+                                    <button onClick={handleDeleteClick} className="px-4 py-2 rounded-lg bg-red-600 text-white font-bold hover:bg-red-700 transition-colors">
+                                        {deleteCount === 2 ? "真的要刪除！" : "確定刪除？"}
+                                    </button>
+                                ) : (
+                                    <button onClick={handleDeleteClick} className="px-4 py-2 rounded-lg text-red-500 hover:bg-red-50 hover:text-red-700 transition-colors font-medium">
+                                        刪除
+                                    </button>
+                                )}
+                                {deleteCount > 0 && <button onClick={handleDeleteCancel} className="text-stone-400 hover:text-stone-600 text-sm">取消</button>}
+                            </div>
+
+                            <div className="flex items-center gap-3">
+                                <button onClick={closeModal} className="px-4 py-2 rounded-lg text-stone-500 font-medium hover:bg-stone-200 transition-colors">
+                                    取消
+                                </button>
+                                <button
+                                    onClick={handleSubmit}
+                                    className="px-4 py-2 rounded-lg bg-stone-800 text-white font-bold hover:bg-stone-700 transition-colors"
+                                >
+                                    儲存更新
+                                </button>
+                                <button
+                                    onClick={handleConfirm}
+                                    className="px-4 py-2 rounded-lg bg-green-100 text-green-700 font-bold hover:bg-green-200 transition-colors flex items-center gap-1"
+                                >
+                                    <span className="material-symbols-outlined text-lg">check</span>
+                                    核許
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
             )}
         </div>
     );
+}
+
+function getTaiwanDate(dateStr?: string) {
+    if (!dateStr) return "-";
+    return dateStr.replace(/\//g, "-");
 }

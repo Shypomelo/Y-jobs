@@ -195,8 +195,22 @@ export default function NorthInventoryPage() {
                 .reduce((sum, e) => sum + e.items.filter((i: InboundItem) => i.itemName === item.model).reduce((s, i: InboundItem) => s + i.quantity, 0), 0);
 
             // Outbound: Verified AND !Archived
+            // Filter by Source based on Target Category
             const usedCount = outbound
                 .filter(e => e.status === "Verified" && !e.archived)
+                .filter(e => {
+                    const src = e.source || "公司庫存";
+                    if (targetCategory === "se_provided") {
+                        return src === "SE提供";
+                    }
+                    if (targetCategory === "general") {
+                        return src !== "SE提供"; // Includes "公司庫存", "案場餘料"
+                    }
+                    // For "se" (Main Solaredge Inventory), we might not have outbound logic yet, 
+                    // or it follows a different rule. 
+                    // Assuming records don't touch "se" main inventory for now unless specified.
+                    return false;
+                })
                 .reduce((sum, e) => sum + e.items.filter((i: EventItem) => i.itemName === item.model).length, 0);
 
             return {
@@ -400,6 +414,66 @@ export default function NorthInventoryPage() {
         setSePickupRecords(prev => prev.filter(r => r.id !== id));
     };
 
+    // Verify Outbound Logic
+    const handleVerifyOutbound = (id: string, updatedEvent: Partial<OutboundEvent>) => {
+        const event = outboundEvents.find(e => e.id === id);
+        if (!event) return;
+        if (event.status === "Verified") {
+            alert("此單據已入帳，請勿重複操作");
+            return;
+        }
+
+        const confirmVerify = window.confirm("確認入帳？（將扣除庫存/計算使用量）");
+        if (!confirmVerify) return;
+
+        // 1. Update Status
+        const newData = {
+            ...updatedEvent,
+            status: "Verified" as const,
+            verifyDate: new Date().toISOString().split("T")[0],
+            verifyUser: "系統"
+        };
+
+        setOutboundEvents(prev => prev.map(e => e.id === id ? { ...e, ...newData } : e));
+
+        // 2. Ensure Items Exist in Inventory (Auto-create if missing)
+        // Note: Actual deduction happens dynamically in calculateStats via the "Verified" status.
+        // We only need to ensure the "Model" exists in the list so calculateStats can see it.
+        const source = (updatedEvent.source || event.source || "公司庫存");
+        const items = event.items || [];
+
+        // Helper to check existence
+        const exists = (model: string) => {
+            return seInventory.some(i => i.model === model) ||
+                generalInventory.some(i => i.model === model) ||
+                (persistedState.seProvidedInventory || []).some(i => i.model === model);
+        };
+
+        // Group items by model to avoid repeated adds
+        const uniqueModels = Array.from(new Set(items.map(i => i.itemName)));
+
+        uniqueModels.forEach(model => {
+            if (model && !exists(model)) {
+                // Determine where to add
+                // Rule: "SE提供" -> seProvided; Others -> general
+                const newItem: InventoryItem = {
+                    model: model,
+                    stock: 0,
+                    inMonth: 0,
+                    usedMonth: 0,
+                    leftMonth: 0 // Will auto-update to negative if used
+                };
+
+                if (source === "SE提供") {
+                    setSeProvidedInventory(prev => [...prev, newItem]);
+                } else {
+                    // Default to General
+                    setGeneralInventory(prev => [...prev, newItem]);
+                }
+            }
+        });
+    };
+
     return (
         <div className="flex min-h-screen w-full flex-col bg-background-light dark:bg-background-dark">
             {/* Header */}
@@ -485,6 +559,7 @@ export default function NorthInventoryPage() {
                             inboundEvents={inboundEvents}
                             setInboundEvents={setInboundEvents}
                             onVerifyInbound={handleVerifyInbound}
+                            onVerifyOutbound={handleVerifyOutbound}  // Pass new handler
                             inventoryItems={generalInventory}
                             onReturnInbound={handleReturnInbound}
                             onReturnOutbound={handleReturnOutbound}
